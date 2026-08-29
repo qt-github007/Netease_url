@@ -18,11 +18,16 @@
             --success: #0ba77a;
             --warning: #f59e0b;
             --shadow: 0 24px 70px rgba(31, 38, 80, .13);
+            --ease-out: cubic-bezier(.16, 1, .3, 1);
+            --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
         }
         * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
         body {
+            position: relative;
             min-height: 100vh;
             margin: 0;
+            overflow-x: hidden;
             color: var(--ink);
             background:
                 radial-gradient(circle at 12% 0%, rgba(108, 92, 231, .16), transparent 34%),
@@ -30,8 +35,33 @@
                 linear-gradient(180deg, #f7f8ff 0%, #f4f7fb 58%, #edf2f7 100%);
             font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
+        body::before,
+        body::after {
+            position: fixed;
+            z-index: 0;
+            width: 380px;
+            height: 380px;
+            border-radius: 50%;
+            pointer-events: none;
+            filter: blur(18px);
+            content: "";
+            opacity: .34;
+            will-change: transform;
+        }
+        body::before {
+            top: -170px;
+            left: -120px;
+            background: radial-gradient(circle, rgba(108, 92, 231, .42), transparent 68%);
+            animation: ambientDrift 18s ease-in-out infinite alternate;
+        }
+        body::after {
+            top: 10%;
+            right: -160px;
+            background: radial-gradient(circle, rgba(25, 183, 201, .34), transparent 68%);
+            animation: ambientDrift 22s ease-in-out 1.5s infinite alternate-reverse;
+        }
         .container { max-width: 1160px; }
-        .app-shell { padding-top: 42px; }
+        .app-shell { position: relative; z-index: 1; padding-top: 42px; }
         .hero {
             display: flex;
             justify-content: space-between;
@@ -39,6 +69,7 @@
             align-items: end;
             margin-bottom: 24px;
         }
+        .hero > div:first-child { animation: revealUp .75s var(--ease-out) both; }
         .hero-kicker {
             display: inline-flex;
             align-items: center;
@@ -52,12 +83,20 @@
             font-size: 12px;
             font-weight: 700;
             letter-spacing: .08em;
+            animation: revealDown .65s .08s var(--ease-out) both;
         }
+        .hero-kicker span { animation: diamondPulse 3s ease-in-out infinite; }
         .hero h1 {
             margin: 0;
             font-size: clamp(32px, 5vw, 54px);
             font-weight: 800;
             letter-spacing: -.045em;
+            background: linear-gradient(100deg, #141a2e 8%, #4d3ed1 52%, #141a2e 92%);
+            background-size: 220% auto;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            animation: revealUp .8s .12s var(--ease-out) both, titleGlow 8s 1s linear infinite;
         }
         .hero p {
             max-width: 650px;
@@ -65,6 +104,7 @@
             color: var(--muted);
             font-size: 16px;
             line-height: 1.75;
+            animation: revealUp .8s .2s var(--ease-out) both;
         }
         .hero-stat {
             flex: 0 0 auto;
@@ -74,6 +114,7 @@
             background: rgba(255, 255, 255, .64);
             box-shadow: 0 12px 36px rgba(31, 38, 80, .08);
             backdrop-filter: blur(16px);
+            animation: revealUp .8s .28s var(--ease-out) both, gentleFloat 6s 1.2s ease-in-out infinite;
         }
         .hero-stat strong { display: block; font-size: 24px; }
         .hero-stat span { color: var(--muted); font-size: 12px; }
@@ -86,6 +127,19 @@
             backdrop-filter: blur(20px);
             overflow: hidden;
         }
+        .workspace-card { position: relative; animation: revealUp .85s .18s var(--ease-out) both; }
+        .workspace-card::before {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            background: radial-gradient(520px circle at var(--pointer-x, 50%) var(--pointer-y, 0%), rgba(108, 92, 231, .09), transparent 52%);
+            opacity: 0;
+            transition: opacity .45s ease;
+            content: "";
+        }
+        .workspace-card:hover::before { opacity: 1; }
+        .workspace-card > * { position: relative; z-index: 1; }
         .mode-nav {
             display: flex;
             gap: 8px;
@@ -102,15 +156,17 @@
             color: #60667a;
             background: transparent;
             font-weight: 650;
-            transition: all .2s ease;
+            transition: color .25s ease, background .25s ease, transform .25s var(--ease-out), box-shadow .25s ease;
         }
-        .mode-btn:hover { color: var(--ink); background: #f3f4fb; }
+        .mode-btn:hover { color: var(--ink); background: #f3f4fb; transform: translateY(-1px); }
+        .mode-btn:active { transform: translateY(0) scale(.98); }
         .mode-btn.active {
             color: #fff;
             background: linear-gradient(135deg, var(--brand), #7f6cf3);
             box-shadow: 0 10px 24px rgba(108, 92, 231, .26);
         }
         .workspace-body { padding: 30px; }
+        .workspace-body > form > div.view-enter { animation: contentReveal .45s var(--ease-out) both; }
         .section-heading { margin-bottom: 22px; }
         .section-heading h2 { margin: 0; font-size: 24px; font-weight: 760; }
         .section-heading p { margin: 7px 0 0; color: var(--muted); }
@@ -133,7 +189,10 @@
             background: transparent;
             font-size: 13px;
             font-weight: 650;
+            transition: color .2s ease, background .2s ease, box-shadow .25s ease, transform .25s var(--ease-spring);
         }
+        .quality-chip:hover { color: var(--brand-dark); transform: translateY(-1px); }
+        .quality-chip:active { transform: scale(.94); }
         .quality-chip.active {
             color: var(--brand-dark);
             background: #fff;
@@ -153,6 +212,7 @@
             background: #f5f6fa;
             font-size: 12px;
             font-weight: 700;
+            transition: color .35s ease, background .35s ease, transform .35s var(--ease-spring), box-shadow .35s ease;
         }
         .workflow-step span {
             display: inline-grid;
@@ -162,9 +222,10 @@
             place-items: center;
             border-radius: 8px;
             background: #e8eaf2;
+            transition: color .35s ease, background .35s ease, transform .35s var(--ease-spring);
         }
-        .workflow-step.active { color: var(--brand-dark); background: #f0edff; }
-        .workflow-step.active span { color: #fff; background: var(--brand); }
+        .workflow-step.active { color: var(--brand-dark); background: #f0edff; box-shadow: inset 0 0 0 1px rgba(108, 92, 231, .12); transform: translateY(-1px); }
+        .workflow-step.active span { color: #fff; background: var(--brand); animation: stepPulse 2.4s ease-in-out infinite; }
         .workflow-step.done { color: #087e61; background: #eaf9f4; }
         .workflow-step.done span { color: #fff; background: var(--success); }
         .source-switch {
@@ -179,8 +240,10 @@
             border-radius: 18px;
             text-align: left;
             background: #fff;
-            transition: all .2s ease;
+            transition: border-color .3s ease, background .3s ease, transform .3s var(--ease-out), box-shadow .3s ease;
         }
+        .source-btn:hover { border-color: rgba(108, 92, 231, .28); transform: translateY(-2px); box-shadow: 0 12px 28px rgba(42, 46, 88, .08); }
+        .source-btn:active { transform: translateY(0) scale(.99); }
         .source-btn strong { display: block; margin-bottom: 4px; }
         .source-btn small { color: var(--muted); }
         .source-btn.active {
@@ -194,6 +257,7 @@
             border-radius: 20px;
             background: rgba(250, 251, 255, .8);
         }
+        .source-panel:not(.d-none) { animation: panelReveal .42s var(--ease-out) both; }
         .input-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; }
         .form-label { color: #3f465b; font-size: 13px; font-weight: 700; }
         .form-control,
@@ -204,21 +268,25 @@
             color: var(--ink);
             background-color: #fff;
             box-shadow: none !important;
+            transition: border-color .25s ease, box-shadow .25s ease, transform .25s var(--ease-out);
         }
         textarea.form-control { min-height: 148px; padding: 14px 16px; resize: vertical; }
         .form-control:focus,
-        .form-select:focus { border-color: rgba(108, 92, 231, .55); }
+        .form-select:focus { border-color: rgba(108, 92, 231, .55); box-shadow: 0 0 0 4px rgba(108, 92, 231, .09) !important; transform: translateY(-1px); }
         .drop-zone {
             min-height: 148px;
             padding: 20px;
             border: 1px dashed rgba(108, 92, 231, .38);
             border-radius: 16px;
             background: linear-gradient(145deg, rgba(108, 92, 231, .05), rgba(25, 183, 201, .05));
+            transition: border-color .3s ease, background .3s ease, transform .3s var(--ease-out), box-shadow .3s ease;
         }
+        .drop-zone:hover { border-color: rgba(108, 92, 231, .64); background: linear-gradient(145deg, rgba(108, 92, 231, .085), rgba(25, 183, 201, .075)); transform: translateY(-2px); box-shadow: 0 12px 30px rgba(55, 51, 115, .07); }
         .drop-zone input[type=file] { min-height: 44px; }
         .batch-file-help { margin-top: 10px; color: var(--muted); line-height: 1.6; }
         .primary-action,
         .download-action {
+            position: relative;
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -230,7 +298,34 @@
             color: #fff;
             font-weight: 750;
             box-shadow: 0 12px 28px rgba(108, 92, 231, .24);
+            overflow: hidden;
+            isolation: isolate;
+            transition: transform .28s var(--ease-spring), box-shadow .28s ease, opacity .2s ease;
         }
+        .primary-action::after,
+        .download-action::after {
+            position: absolute;
+            inset: -40% auto -40% -45%;
+            z-index: 0;
+            width: 38%;
+            pointer-events: none;
+            background: linear-gradient(100deg, transparent, rgba(255,255,255,.34), transparent);
+            transform: skewX(-18deg);
+            transition: left .65s var(--ease-out);
+            content: "";
+        }
+        .primary-action:hover:not(:disabled),
+        .download-action:hover:not(:disabled) { transform: translateY(-2px) scale(1.01); }
+        .primary-action:hover:not(:disabled) { box-shadow: 0 18px 34px rgba(108, 92, 231, .32); }
+        .download-action:hover:not(:disabled) { box-shadow: 0 18px 34px rgba(11, 167, 122, .3); }
+        .primary-action:hover:not(:disabled)::after,
+        .download-action:hover:not(:disabled)::after { left: 115%; }
+        .primary-action:active:not(:disabled),
+        .download-action:active:not(:disabled) { transform: translateY(0) scale(.98); }
+        .primary-action > span,
+        .download-action > span { position: relative; z-index: 1; }
+        .primary-action > span:last-child { transition: transform .25s var(--ease-spring); }
+        .primary-action:hover:not(:disabled) > span:last-child { transform: translateX(4px); }
         .primary-action { background: linear-gradient(135deg, var(--brand), var(--brand-dark)); }
         .download-action { background: linear-gradient(135deg, #0cb685, #078967); box-shadow: 0 12px 28px rgba(11, 167, 122, .22); }
         .primary-action:disabled,
@@ -246,13 +341,18 @@
             color: #5f6679;
             background: #f5f6fa;
             font-size: 13px;
+            transition: color .3s ease, background .3s ease, box-shadow .3s ease;
         }
         .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #aeb3c1; }
-        .workflow-status.running .status-dot { background: var(--brand); box-shadow: 0 0 0 6px rgba(108,92,231,.12); }
-        .workflow-status.success .status-dot { background: var(--success); }
+        .workflow-status.running { color: var(--brand-dark); background: #f2efff; }
+        .workflow-status.running .status-dot { background: var(--brand); animation: statusPulse 1.5s ease-out infinite; }
+        .workflow-status.success { color: #087e61; background: #eaf9f4; box-shadow: inset 0 0 0 1px rgba(11, 167, 122, .09); }
+        .workflow-status.success .status-dot { background: var(--success); animation: successPop .55s var(--ease-spring) both; }
+        .status-text.status-refresh { animation: statusText .3s var(--ease-out) both; }
         .quick-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
         .quick-panel summary { cursor: pointer; color: #596176; font-weight: 700; }
         .result-card { margin-top: 22px; }
+        .result-card:not(.d-none) { animation: resultReveal .55s var(--ease-out) both; }
         .result-header {
             display: flex;
             align-items: center;
@@ -269,7 +369,10 @@
             border: 1px solid var(--line);
             border-radius: 17px;
             background: #fff;
+            animation: cardReveal .45s calc(var(--stagger, 0) + 60ms) var(--ease-out) both;
+            transition: border-color .25s ease, transform .25s var(--ease-out), box-shadow .25s ease;
         }
+        .match-card:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(42, 46, 88, .08); }
         .match-card.needs-review { border-color: rgba(245, 158, 11, .42); background: #fffbf2; }
         .match-top { display: grid; grid-template-columns: auto minmax(120px, .8fr) minmax(260px, 1.5fr) auto; gap: 14px; align-items: center; }
         .match-query { color: #6c7386; font-size: 13px; }
@@ -277,6 +380,7 @@
         .match-song small { color: var(--muted); }
         .match-id { color: var(--brand-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
         .candidate-panel { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+        .candidate-panel:not(.d-none) { animation: panelReveal .32s var(--ease-out) both; }
         .candidate-option {
             display: flex;
             justify-content: space-between;
@@ -286,9 +390,10 @@
             border-radius: 12px;
             text-align: left;
             background: #fafbfe;
+            transition: border-color .2s ease, background .2s ease, transform .22s var(--ease-out), box-shadow .22s ease;
         }
         .candidate-option:hover,
-        .candidate-option.selected { border-color: rgba(108, 92, 231, .45); background: #f3f0ff; }
+        .candidate-option.selected { border-color: rgba(108, 92, 231, .45); background: #f3f0ff; transform: translateX(3px); box-shadow: 0 7px 16px rgba(70, 61, 155, .07); }
         .candidate-option small { color: var(--muted); }
         .badge-soft { display: inline-flex; padding: 5px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; }
         .badge-soft.warning { color: #9a6300; background: #fff0c9; }
@@ -297,13 +402,30 @@
         .batch-result-table td { vertical-align: middle; white-space: nowrap; }
         .batch-result-table th { padding: 13px 16px; color: #73798c; font-size: 12px; font-weight: 750; background: #f8f9fc; }
         .batch-result-table td { padding: 13px 16px; }
+        .batch-result-table tbody tr { animation: rowReveal .38s calc(var(--stagger, 0) + 40ms) var(--ease-out) both; }
         .batch-result-table .batch-song-name { min-width: 170px; white-space: normal; }
         .song-title, .playlist-title { display: inline-block; max-width: 240px; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .list-group-item .select-song { flex-shrink: 0; margin-left: 10px; }
         .lyric-box { max-height: 180px; overflow-y: auto; border-radius: 14px; padding: 14px 16px; color: #252a3b; background: #f6f7fb; line-height: 1.75; }
         .progress { height: 7px; border-radius: 999px; background: #e9eaf1; }
-        .progress-bar { background: linear-gradient(90deg, var(--brand), var(--cyan)); }
+        .progress-bar { background: linear-gradient(90deg, var(--brand), var(--cyan), var(--brand)); background-size: 200% 100%; animation: progressFlow 1.6s linear infinite; }
         .footer { background: transparent !important; border: 0 !important; }
+        @keyframes ambientDrift { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(70px, 50px, 0) scale(1.16); } }
+        @keyframes revealUp { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes revealDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes contentReveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes panelReveal { from { opacity: 0; transform: translateY(9px) scale(.992); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        @keyframes resultReveal { from { opacity: 0; transform: translateY(18px) scale(.992); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        @keyframes cardReveal { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes rowReveal { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes titleGlow { to { background-position: -220% center; } }
+        @keyframes gentleFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+        @keyframes diamondPulse { 0%, 100% { opacity: .7; transform: scale(.9) rotate(0); } 50% { opacity: 1; transform: scale(1.08) rotate(45deg); } }
+        @keyframes stepPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(108, 92, 231, .2); } 50% { box-shadow: 0 0 0 6px rgba(108, 92, 231, 0); } }
+        @keyframes statusPulse { 0% { box-shadow: 0 0 0 0 rgba(108,92,231,.28); } 100% { box-shadow: 0 0 0 8px rgba(108,92,231,0); } }
+        @keyframes successPop { 0% { transform: scale(.4); } 70% { transform: scale(1.35); } 100% { transform: scale(1); } }
+        @keyframes statusText { from { opacity: .2; transform: translateX(-4px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes progressFlow { to { background-position: -200% 0; } }
         @media (max-width: 800px) {
             .app-shell { padding-top: 24px; }
             .hero { display: block; }
@@ -314,6 +436,15 @@
             .workflow-steps { grid-template-columns: repeat(2, 1fr); }
             .match-top { grid-template-columns: auto 1fr; }
             .match-song, .match-id { grid-column: 2; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+            *, *::before, *::after {
+                animation-duration: .01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: .01ms !important;
+                scroll-behavior: auto !important;
+            }
         }
     </style>
 </head>
@@ -401,7 +532,7 @@
                             <div id="resolve-names-progress" class="mt-3 d-none"><div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:100%"></div></div></div>
                         </div>
 
-                        <div id="workflow-status" class="workflow-status"><span class="status-dot"></span><span class="status-text">选择一种输入方式开始任务</span></div>
+                        <div id="workflow-status" class="workflow-status" role="status" aria-live="polite"><span class="status-dot"></span><span class="status-text">选择一种输入方式开始任务</span></div>
 
                         <details class="quick-panel">
                             <summary>单曲快速解析</summary>
@@ -671,7 +802,12 @@
                 $('#workflow-status')
                     .removeClass('running success')
                     .addClass(state || '');
-                $('#workflow-status .status-text').text(message || '任务状态已更新');
+                const statusText = $('#workflow-status .status-text');
+                statusText.removeClass('status-refresh').text(message || '任务状态已更新');
+                if (statusText[0]) {
+                    void statusText[0].offsetWidth;
+                }
+                statusText.addClass('status-refresh');
             }
 
             $('.mode-btn').on('click', function() {
@@ -695,6 +831,15 @@
                     ? '导入 ID、链接或已有文件后开始解析'
                     : '输入歌名后，系统将自动识别并进入解析');
             });
+
+            const workspaceCard = document.querySelector('.workspace-card');
+            if (workspaceCard && window.matchMedia('(pointer: fine)').matches && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                workspaceCard.addEventListener('pointermove', function(event) {
+                    const rect = workspaceCard.getBoundingClientRect();
+                    workspaceCard.style.setProperty('--pointer-x', `${event.clientX - rect.left}px`);
+                    workspaceCard.style.setProperty('--pointer-y', `${event.clientY - rect.top}px`);
+                });
+            }
 
             // 切换功能区
             $('#mode-select').on('change', function() {
@@ -760,6 +905,12 @@
                     $('#download-area').hide();
                     $('#album-result').addClass('d-none');
                 }
+                const activeArea = $(`#${$(this).val()}-area`);
+                activeArea.removeClass('view-enter');
+                if (activeArea[0]) {
+                    void activeArea[0].offsetWidth;
+                }
+                activeArea.addClass('view-enter');
             });
 
             // 搜索功能
@@ -875,7 +1026,7 @@
                 data.results.forEach(function(item, index) {
                     if (!item.success) {
                         list.append(`
-                            <tr>
+                            <tr style="--stagger:${Math.min(index, 10) * 34}ms">
                                 <td>${index + 1}</td>
                                 <td><span class="badge bg-danger">失败</span></td>
                                 <td>${escapeHtml(item.id)}</td>
@@ -891,7 +1042,7 @@
                         ? `<a class="btn btn-sm btn-outline-primary me-1" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener">试听</a>`
                         : '';
                     list.append(`
-                        <tr>
+                        <tr style="--stagger:${Math.min(index, 10) * 34}ms">
                             <td>${index + 1}</td>
                             <td><span class="badge bg-success">成功</span></td>
                             <td>${escapeHtml(item.id)}</td>
@@ -948,7 +1099,7 @@
                 data.results.forEach(function(item, resultIndex) {
                     if (!item.success) {
                         list.append(`
-                            <div class="match-card needs-review">
+                            <div class="match-card needs-review" style="--stagger:${Math.min(resultIndex, 10) * 45}ms">
                                 <div class="match-top">
                                     <input class="form-check-input" type="checkbox" disabled>
                                     <div class="match-query">${escapeHtml(item.query)}</div>
@@ -980,7 +1131,7 @@
                         ? '<span class="badge-soft success artist-review-badge">已确认</span>'
                         : '<span class="badge-soft warning artist-review-badge">歌手未匹配</span>';
                     list.append(`
-                        <div class="match-card ${autoSelected ? '' : 'needs-review'}" data-result-index="${resultIndex}">
+                        <div class="match-card ${autoSelected ? '' : 'needs-review'}" data-result-index="${resultIndex}" style="--stagger:${Math.min(resultIndex, 10) * 45}ms">
                             <div class="match-top">
                                 <input class="form-check-input name-match-checkbox" type="checkbox" data-id="${escapeHtml(item.id)}" ${autoSelected ? 'checked' : ''}>
                                 <div class="match-query"><span>输入</span><br>${escapeHtml(item.query)}</div>
@@ -1409,4 +1560,3 @@
     </script>
 </body>
 </html>
-
