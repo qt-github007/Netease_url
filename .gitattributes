@@ -1,0 +1,3 @@
+/main.py whitespace=cr-at-eol
+/templates/index.html whitespace=cr-at-eol
+/README.md whitespace=cr-at-eol

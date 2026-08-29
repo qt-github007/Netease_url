@@ -9,14 +9,26 @@
 """
 
 import logging
+import re
+import shutil
 import sys
+import tempfile
 import time
 import traceback
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
-from urllib.parse import quote
+from typing import Dict, Any, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 from flask import Flask, request, send_file, render_template, Response
+
+
+VALID_QUALITIES = (
+    'standard', 'exhigh', 'lossless', 'hires',
+    'sky', 'jyeffect', 'jymaster', 'dolby'
+)
 
 try:
     from music_api import (
@@ -43,6 +55,10 @@ class APIConfig:
     request_timeout: int = 30
     log_level: str = 'INFO'
     cors_origins: str = '*'
+    max_upload_size: int = 10 * 1024 * 1024  # 10MB
+    max_batch_items: int = 200
+    max_file_items: int = 2000
+    batch_workers: int = 4
 
 
 class APIResponse:
@@ -127,26 +143,276 @@ class MusicAPIService:
             return {}
     
     def _extract_music_id(self, id_or_url: str) -> str:
-        """提取音乐ID"""
+        """从纯数字或网易云歌曲链接中提取歌曲 ID。"""
+        candidate = str(id_or_url or '').strip()
+        if re.fullmatch(r'\d+', candidate):
+            return candidate
+
+        parsed = urlparse(candidate)
+        hostname = (parsed.hostname or '').lower()
+
+        # 仅允许真正的网易云短链域名，避免把包含该字符串的任意 URL 当成短链请求。
+        if hostname == '163cn.tv':
+            import requests
+            response = requests.get(candidate, allow_redirects=False, timeout=10)
+            location = response.headers.get('Location')
+            if not location:
+                raise ValueError("网易云短链接没有返回有效跳转地址")
+            candidate = urljoin(candidate, location)
+            parsed = urlparse(candidate)
+            hostname = (parsed.hostname or '').lower()
+
+        if hostname != 'music.163.com' and not hostname.endswith('.music.163.com'):
+            raise ValueError("只支持纯歌曲 ID 或网易云歌曲链接")
+
+        fragment = parsed.fragment or ''
+        route_text = f"{parsed.path}?{parsed.query}#{fragment}"
+        if '/song' not in route_text:
+            raise ValueError("链接不是网易云单曲链接")
+
+        query_parts = [parsed.query]
+        if '?' in fragment:
+            query_parts.append(fragment.split('?', 1)[1])
+        for query_part in query_parts:
+            music_ids = parse_qs(query_part).get('id', [])
+            if music_ids and re.fullmatch(r'\d+', music_ids[0]):
+                return music_ids[0]
+
+        match = re.search(r'(?:[?&#]|^)id=(\d+)', candidate)
+        if match:
+            return match.group(1)
+        raise ValueError("歌曲链接中没有找到有效 ID")
+
+    def extract_music_ids_from_text(self, text: str) -> List[str]:
+        """从文本或 CSV 内容中提取歌曲 ID，并按出现顺序去重。"""
+        if not text:
+            return []
+
+        found: List[str] = []
+        seen = set()
+        url_pattern = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
+
+        def add_music_id(value: str) -> None:
+            if value not in seen:
+                seen.add(value)
+                found.append(value)
+
+        for line in text.splitlines():
+            urls = url_pattern.findall(line)
+            for raw_url in urls:
+                cleaned_url = raw_url.rstrip('.,，。;；)）]}')
+                try:
+                    add_music_id(self._extract_music_id(cleaned_url))
+                except ValueError:
+                    continue
+
+            # URL 已经单独处理，避免再把 URL 参数里的数字提取一次。
+            plain_text = url_pattern.sub(' ', line)
+            for music_id in re.findall(r'(?<![\w])\d{3,20}(?![\w])', plain_text):
+                add_music_id(music_id)
+
+        return found
+
+    def read_song_ids_from_upload(self, uploaded_file) -> List[str]:
+        """读取上传的 TXT/CSV/XLSX 文件并提取歌曲 ID。"""
+        filename = uploaded_file.filename or ''
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {'.txt', '.csv', '.xlsx'}:
+            raise ValueError("仅支持 .txt、.csv 或 .xlsx 文件")
+
+        raw = uploaded_file.stream.read(self.config.max_upload_size + 1)
+        if len(raw) > self.config.max_upload_size:
+            raise ValueError("上传文件不能超过 10MB")
+        if not raw:
+            raise ValueError("上传文件为空")
+
+        if suffix == '.xlsx':
+            music_ids = self.extract_music_ids_from_xlsx(raw)
+            return self.validate_batch_ids(music_ids)
+
+        text = None
+        for encoding in ('utf-8-sig', 'gb18030'):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            raise ValueError("文件编码无法识别，请使用 UTF-8 或 GB18030")
+
+        music_ids = self.extract_music_ids_from_text(text)
+        if not music_ids:
+            raise ValueError("文件中没有找到歌曲 ID 或网易云单曲链接")
+        return self.validate_batch_ids(music_ids)
+
+    def extract_music_ids_from_xlsx(self, raw: bytes) -> List[str]:
+        """从带“歌曲 ID”或“网易云链接”表头的 Excel 工作表中提取歌曲。"""
         try:
-            # 处理短链接
-            if '163cn.tv' in id_or_url:
-                import requests
-                response = requests.get(id_or_url, allow_redirects=False, timeout=10)
-                id_or_url = response.headers.get('Location', id_or_url)
-            
-            # 处理网易云链接
-            if 'music.163.com' in id_or_url:
-                index = id_or_url.find('id=') + 3
-                if index > 2:
-                    return id_or_url[index:].split('&')[0]
-            
-            # 直接返回ID
-            return str(id_or_url).strip()
-            
+            with zipfile.ZipFile(BytesIO(raw)) as archive:
+                expanded_size = sum(item.file_size for item in archive.infolist())
+                if expanded_size > 100 * 1024 * 1024:
+                    raise ValueError("Excel 解压后体积过大，请精简文件后重试")
+        except zipfile.BadZipFile as e:
+            raise ValueError("Excel 文件已损坏或不是有效的 .xlsx 文件") from e
+
+        try:
+            from openpyxl import load_workbook
+            workbook = load_workbook(
+                BytesIO(raw),
+                read_only=False,
+                data_only=True,
+                keep_links=False,
+            )
         except Exception as e:
-            self.logger.error(f"提取音乐ID失败: {e}")
-            return str(id_or_url).strip()
+            raise ValueError(f"无法读取 Excel 文件: {e}") from e
+
+        found: List[str] = []
+        seen = set()
+        matched_sheet = False
+
+        def add_candidate(value: Any) -> bool:
+            if value is None or isinstance(value, bool):
+                return False
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            candidate = str(value).strip()
+            if not candidate:
+                return False
+            try:
+                music_id = self._extract_music_id(candidate)
+            except ValueError:
+                return False
+            if music_id not in seen:
+                seen.add(music_id)
+                found.append(music_id)
+            return True
+
+        try:
+            for sheet in workbook.worksheets:
+                header_row = None
+                id_columns: List[int] = []
+                link_columns: List[int] = []
+                scan_rows = min(sheet.max_row or 0, 100)
+                scan_columns = min(sheet.max_column or 0, 200)
+
+                for row in sheet.iter_rows(
+                    min_row=1,
+                    max_row=scan_rows,
+                    max_col=scan_columns,
+                ):
+                    current_id_columns: List[int] = []
+                    current_link_columns: List[int] = []
+                    for cell in row:
+                        header = re.sub(r'\s+', '', str(cell.value or '')).lower()
+                        if header in {'歌曲id', '音乐id', '网易云歌曲id'}:
+                            current_id_columns.append(cell.column)
+                        elif header in {'网易云链接', '歌曲链接', '音乐链接'}:
+                            current_link_columns.append(cell.column)
+                    if current_id_columns or current_link_columns:
+                        header_row = row[0].row
+                        id_columns = current_id_columns
+                        link_columns = current_link_columns
+                        break
+
+                if header_row is None:
+                    continue
+                matched_sheet = True
+                max_column = max(id_columns + link_columns)
+
+                for row in sheet.iter_rows(
+                    min_row=header_row + 1,
+                    max_row=sheet.max_row,
+                    max_col=max_column,
+                ):
+                    added = False
+                    for column in link_columns:
+                        cell = row[column - 1]
+                        hyperlink = getattr(cell.hyperlink, 'target', None) if cell.hyperlink else None
+                        for value in (hyperlink, cell.value):
+                            if add_candidate(value):
+                                added = True
+                                break
+                        if added:
+                            break
+                    if added:
+                        continue
+                    for column in id_columns:
+                        if add_candidate(row[column - 1].value):
+                            break
+        finally:
+            workbook.close()
+
+        if not matched_sheet:
+            raise ValueError("Excel 中没有找到“歌曲 ID”或“网易云链接”表头")
+        if not found:
+            raise ValueError("Excel 中没有找到有效的歌曲 ID 或网易云单曲链接")
+        return found
+
+    def validate_batch_ids(self, values: Iterable[Any]) -> List[str]:
+        """规范化、去重并限制批量歌曲 ID。"""
+        music_ids: List[str] = []
+        seen = set()
+        for value in values:
+            value_text = str(value or '').strip()
+            if not value_text:
+                continue
+            extracted = self.extract_music_ids_from_text(value_text)
+            if not extracted:
+                try:
+                    extracted = [self._extract_music_id(value_text)]
+                except ValueError:
+                    continue
+            for music_id in extracted:
+                if music_id not in seen:
+                    seen.add(music_id)
+                    music_ids.append(music_id)
+
+        if not music_ids:
+            raise ValueError("没有提供有效的歌曲 ID")
+        if len(music_ids) > self.config.max_file_items:
+            raise ValueError(
+                f"单个文件或请求最多识别 {self.config.max_file_items} 首歌曲，"
+                f"当前识别到 {len(music_ids)} 首"
+            )
+        return music_ids
+
+    def split_batch_ids(self, music_ids: List[str]) -> List[List[str]]:
+        """按配置的单批上限切分歌曲 ID。"""
+        return [
+            music_ids[index:index + self.config.max_batch_items]
+            for index in range(0, len(music_ids), self.config.max_batch_items)
+        ]
+
+    def parse_song_summary(self, music_id: str, level: str, cookies: Dict[str, str]) -> Dict[str, Any]:
+        """解析批量列表需要的歌曲摘要，单首失败不会中断整个批次。"""
+        try:
+            song_info = name_v1(int(music_id))
+            url_info = url_v1(int(music_id), level, cookies)
+            songs = song_info.get('songs', []) if song_info else []
+            if not songs:
+                raise APIException("未找到歌曲信息")
+
+            song_data = songs[0]
+            url_data = (url_info.get('data') or [{}])[0] if url_info else {}
+            return {
+                'id': music_id,
+                'success': True,
+                'name': song_data.get('name', ''),
+                'artists': ', '.join(artist.get('name', '') for artist in song_data.get('ar', [])),
+                'album': song_data.get('al', {}).get('name', ''),
+                'pic': song_data.get('al', {}).get('picUrl', ''),
+                'url': url_data.get('url', ''),
+                'level': url_data.get('level', level),
+                'size': url_data.get('size', 0),
+                'size_formatted': self._format_file_size(url_data.get('size', 0)),
+                'file_type': url_data.get('type', ''),
+            }
+        except Exception as e:
+            return {
+                'id': music_id,
+                'success': False,
+                'error': str(e),
+            }
     
     def _format_file_size(self, size_bytes: int) -> str:
         """格式化文件大小"""
@@ -203,6 +469,7 @@ class MusicAPIService:
 # 创建Flask应用和服务实例
 config = APIConfig()
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = config.max_upload_size + 64 * 1024
 api_service = MusicAPIService(config)
 
 
@@ -223,6 +490,10 @@ def after_request(response: Response) -> Response:
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     response.headers.add('Access-Control-Max-Age', '3600')
+    response.headers.add(
+        'Access-Control-Expose-Headers',
+        'Content-Disposition,X-Download-Filename,X-Batch-Succeeded,X-Batch-Failed'
+    )
     
     # 记录响应信息
     api_service.logger.info(f"响应状态: {response.status_code}")
@@ -248,6 +519,12 @@ def handle_internal_error(e):
     return APIResponse.error("服务器内部错误", 500)
 
 
+@app.errorhandler(413)
+def handle_file_too_large(e):
+    """处理上传体积超限。"""
+    return APIResponse.error("上传文件不能超过 10MB", 413)
+
+
 @app.route('/')
 def index() -> str:
     """首页路由"""
@@ -268,7 +545,7 @@ def health_check():
             'cookie_status': cookie_status,
             'cookie_count': len(cookies),
             'downloads_dir': str(api_service.downloads_path.absolute()),
-            'version': '2.0.0'
+            'version': '2.1.0'
         }
 
         return APIResponse.success(health_info, "API服务运行正常")
@@ -298,9 +575,8 @@ def get_song_info():
         music_id = api_service._extract_music_id(song_ids or url)
         
         # 验证音质参数
-        valid_levels = ['standard', 'exhigh', 'lossless', 'hires', 'sky', 'jyeffect', 'jymaster', 'dolby']
-        if level not in valid_levels:
-            return APIResponse.error(f"无效的音质参数，支持: {', '.join(valid_levels)}")
+        if level not in VALID_QUALITIES:
+            return APIResponse.error(f"无效的音质参数，支持: {', '.join(VALID_QUALITIES)}")
         
         # 验证类型参数
         valid_types = ['url', 'name', 'lyric', 'json']
@@ -375,12 +651,182 @@ def get_song_info():
             
             return APIResponse.success(response_data, "获取歌曲信息成功")
             
+    except ValueError as e:
+        return APIResponse.error(str(e), 400)
     except APIException as e:
         api_service.logger.error(f"API调用失败: {e}")
         return APIResponse.error(f"API调用失败: {str(e)}", 500)
     except Exception as e:
         api_service.logger.error(f"获取歌曲信息异常: {e}\n{traceback.format_exc()}")
         return APIResponse.error(f"服务器错误: {str(e)}", 500)
+
+
+def _get_batch_ids_from_request() -> List[str]:
+    """从上传文件、JSON 或表单字段读取批量歌曲 ID。"""
+    uploaded_file = request.files.get('file')
+    if uploaded_file and uploaded_file.filename:
+        return api_service.read_song_ids_from_upload(uploaded_file)
+
+    data = api_service._safe_get_request_data()
+    raw_ids = data.get('ids') or data.get('content')
+    if isinstance(raw_ids, list):
+        values = raw_ids
+    elif raw_ids is not None:
+        values = [raw_ids]
+    else:
+        values = []
+    return api_service.validate_batch_ids(values)
+
+
+@app.route('/batch/parse', methods=['POST'])
+def batch_parse_songs():
+    """从上传文件或 ID 列表中批量解析歌曲。"""
+    try:
+        data = api_service._safe_get_request_data()
+        level = data.get('level', 'lossless')
+        if level not in VALID_QUALITIES:
+            return APIResponse.error(f"无效的音质参数，支持: {', '.join(VALID_QUALITIES)}")
+
+        music_ids = _get_batch_ids_from_request()
+        cookies = api_service._get_cookies()
+
+        def parse_one(music_id: str) -> Dict[str, Any]:
+            return api_service.parse_song_summary(music_id, level, cookies)
+
+        batches = api_service.split_batch_ids(music_ids)
+        results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=config.batch_workers) as executor:
+            for batch in batches:
+                results.extend(executor.map(parse_one, batch))
+
+        succeeded = sum(1 for item in results if item.get('success'))
+        response_data = {
+            'ids': music_ids,
+            'total': len(music_ids),
+            'succeeded': succeeded,
+            'failed': len(music_ids) - succeeded,
+            'level': level,
+            'batch_size': config.max_batch_items,
+            'batch_count': len(batches),
+            'results': results,
+        }
+        return APIResponse.success(response_data, f"批量解析完成，成功 {succeeded} 首")
+    except ValueError as e:
+        return APIResponse.error(str(e), 400)
+    except Exception as e:
+        api_service.logger.error(f"批量解析异常: {e}\n{traceback.format_exc()}")
+        return APIResponse.error(f"批量解析失败: {str(e)}", 500)
+
+
+@app.route('/batch/download', methods=['POST'])
+def batch_download_songs():
+    """批量下载歌曲并打包成 ZIP。"""
+    temp_root: Optional[Path] = None
+    try:
+        data = api_service._safe_get_request_data()
+        quality = data.get('quality', data.get('level', 'lossless'))
+        if quality not in VALID_QUALITIES:
+            return APIResponse.error(f"无效的音质参数，支持: {', '.join(VALID_QUALITIES)}")
+
+        music_ids = _get_batch_ids_from_request()
+        temp_root = Path(tempfile.mkdtemp(prefix='netease_batch_'))
+
+        def download_one(music_id: str) -> Dict[str, Any]:
+            song_dir = temp_root / music_id
+            try:
+                downloader = MusicDownloader(
+                    download_dir=str(song_dir),
+                    max_file_size=config.max_file_size,
+                )
+                result = downloader.download_music_file(int(music_id), quality)
+                if not result.success or not result.file_path:
+                    return {
+                        'id': music_id,
+                        'success': False,
+                        'error': result.error_message or '下载失败',
+                    }
+                return {
+                    'id': music_id,
+                    'success': True,
+                    'file_path': result.file_path,
+                    'filename': Path(result.file_path).name,
+                }
+            except Exception as e:
+                return {'id': music_id, 'success': False, 'error': str(e)}
+
+        batches = api_service.split_batch_ids(music_ids)
+        results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=config.batch_workers) as executor:
+            for batch in batches:
+                results.extend(executor.map(download_one, batch))
+
+        successful = [item for item in results if item.get('success')]
+        failed = [item for item in results if not item.get('success')]
+        if not successful:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            temp_root = None
+            error_preview = '；'.join(
+                f"{item['id']}: {item.get('error', '下载失败')}" for item in failed[:3]
+            )
+            return APIResponse.error(f"批量下载全部失败：{error_preview}", 502)
+
+        zip_name = f"netease_batch_{time.strftime('%Y%m%d_%H%M%S')}_{quality}.zip"
+        zip_path = temp_root / zip_name
+        used_names = set()
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_STORED) as archive:
+            for item in successful:
+                file_path = Path(item['file_path'])
+                archive_name = item['filename']
+                if archive_name in used_names:
+                    archive_name = f"{item['id']} - {archive_name}"
+                used_names.add(archive_name)
+                archive.write(file_path, arcname=archive_name)
+
+            summary_lines = [
+                f"音质：{quality}",
+                f"请求：{len(music_ids)} 首",
+                f"批次：{len(batches)} 批（每批最多 {config.max_batch_items} 首）",
+                f"成功：{len(successful)} 首",
+                f"失败：{len(failed)} 首",
+                '',
+            ]
+            if failed:
+                summary_lines.append('失败明细：')
+                summary_lines.extend(
+                    f"- {item['id']}: {item.get('error', '下载失败')}" for item in failed
+                )
+            archive.writestr('批量下载结果.txt', '\ufeff' + '\n'.join(summary_lines))
+
+        # ZIP 生成后立即清理音频临时目录，只保留待发送的压缩包。
+        for child in temp_root.iterdir():
+            if child == zip_path:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
+        response = send_file(
+            str(zip_path),
+            as_attachment=True,
+            download_name=zip_name,
+            mimetype='application/zip',
+        )
+        response.headers['X-Batch-Succeeded'] = str(len(successful))
+        response.headers['X-Batch-Failed'] = str(len(failed))
+        cleanup_root = temp_root
+        response.call_on_close(lambda: shutil.rmtree(cleanup_root, ignore_errors=True))
+        temp_root = None
+        return response
+    except ValueError as e:
+        if temp_root:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        return APIResponse.error(str(e), 400)
+    except Exception as e:
+        if temp_root:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        api_service.logger.error(f"批量下载异常: {e}\n{traceback.format_exc()}")
+        return APIResponse.error(f"批量下载失败: {str(e)}", 500)
 
 
 @app.route('/search', methods=['GET', 'POST'])
@@ -500,9 +946,8 @@ def download_music_api():
             return validation_error
         
         # 验证音质参数
-        valid_qualities = ['standard', 'exhigh', 'lossless', 'hires', 'sky', 'jyeffect', 'jymaster', 'dolby']
-        if quality not in valid_qualities:
-            return APIResponse.error(f"无效的音质参数，支持: {', '.join(valid_qualities)}")
+        if quality not in VALID_QUALITIES:
+            return APIResponse.error(f"无效的音质参数，支持: {', '.join(VALID_QUALITIES)}")
         
         # 验证返回格式
         if return_format not in ['file', 'json']:
@@ -524,6 +969,11 @@ def download_music_api():
         # 构建音乐信息
         song_data = song_info['songs'][0]
         url_data = url_info['data'][0]
+        if url_data.get('size', 0) > config.max_file_size:
+            return APIResponse.error(
+                f"歌曲文件超过单文件限制 {api_service._format_file_size(config.max_file_size)}",
+                413,
+            )
         
         music_info = {
             'id': music_id,
@@ -537,32 +987,17 @@ def download_music_api():
             'download_url': url_data['url']
         }
         
-        # 生成安全文件名
-        safe_name = f"{music_info['name']} [{quality}]"
-        safe_name = ''.join(c for c in safe_name if c not in r'<>:"/\|?*')
-        filename = f"{safe_name}.{music_info['file_type']}"
-        
-        file_path = api_service.downloads_path / filename
-        
-        # 检查文件是否已存在
-        if file_path.exists():
-            api_service.logger.info(f"文件已存在: {filename}")
-        else:
-            # 使用优化后的下载器下载
-            try:
-                download_result = api_service.downloader.download_music_file(
-                    music_id, quality
-                )
-                
-                if not download_result.success:
-                    return APIResponse.error(f"下载失败: {download_result.error_message}", 500)
-                
-                file_path = Path(download_result.file_path)
-                api_service.logger.info(f"下载完成: {filename}")
-                
-            except DownloadException as e:
-                api_service.logger.error(f"下载异常: {e}")
-                return APIResponse.error(f"下载失败: {str(e)}", 500)
+        # 下载器负责统一生成包含 ID 和音质的文件名，避免不同音质误用同一缓存文件。
+        try:
+            download_result = api_service.downloader.download_music_file(music_id, quality)
+            if not download_result.success or not download_result.file_path:
+                return APIResponse.error(f"下载失败: {download_result.error_message}", 500)
+            file_path = Path(download_result.file_path)
+            filename = file_path.name
+            api_service.logger.info(f"下载完成: {filename}")
+        except DownloadException as e:
+            api_service.logger.error(f"下载异常: {e}")
+            return APIResponse.error(f"下载失败: {str(e)}", 500)
         
         # 根据返回格式返回结果
         if return_format == 'json':
@@ -573,7 +1008,7 @@ def download_music_api():
                 'album': music_info['album'],
                 'quality': quality,
                 'quality_name': api_service._get_quality_display_name(quality),
-                'file_type': music_info['file_type'],
+                'file_type': file_path.suffix.lstrip('.') or music_info['file_type'],
                 'file_size': music_info['file_size'],
                 'file_size_formatted': api_service._format_file_size(music_info['file_size']),
                 'file_path': str(file_path.absolute()),
@@ -591,7 +1026,7 @@ def download_music_api():
                     str(file_path),
                     as_attachment=True,
                     download_name=filename,
-                    mimetype=f"audio/{music_info['file_type']}"
+                    mimetype=f"audio/{file_path.suffix.lstrip('.') or music_info['file_type']}"
                 )
                 response.headers['X-Download-Message'] = 'Download completed successfully'
                 response.headers['X-Download-Filename'] = quote(filename, safe='')
@@ -600,6 +1035,8 @@ def download_music_api():
                 api_service.logger.error(f"发送文件失败: {e}")
                 return APIResponse.error(f"文件发送失败: {str(e)}", 500)
             
+    except ValueError as e:
+        return APIResponse.error(str(e), 400)
     except Exception as e:
         api_service.logger.error(f"下载音乐异常: {e}\n{traceback.format_exc()}")
         return APIResponse.error(f"下载异常: {str(e)}", 500)
@@ -611,7 +1048,7 @@ def api_info():
     try:
         info = {
             'name': '网易云音乐API服务',
-            'version': '2.0.0',
+            'version': '2.1.0',
             'description': '提供网易云音乐相关API服务',
             'endpoints': {
                 '/health': 'GET - 健康检查',
@@ -620,15 +1057,20 @@ def api_info():
                 '/playlist': 'GET/POST - 获取歌单详情',
                 '/album': 'GET/POST - 获取专辑详情',
                 '/download': 'GET/POST - 下载音乐',
+                '/batch/parse': 'POST - 上传文件或 ID 列表批量解析',
+                '/batch/download': 'POST - 批量下载并打包 ZIP',
                 '/api/info': 'GET - API信息'
             },
             'supported_qualities': [
                 'standard', 'exhigh', 'lossless', 
-                'hires', 'sky', 'jyeffect', 'jymaster'
+                'hires', 'sky', 'jyeffect', 'jymaster', 'dolby'
             ],
             'config': {
                 'downloads_dir': str(api_service.downloads_path.absolute()),
                 'max_file_size': f"{config.max_file_size // (1024*1024)}MB",
+                'max_upload_size': f"{config.max_upload_size // (1024*1024)}MB",
+                'max_batch_items': config.max_batch_items,
+                'max_file_items': config.max_file_items,
                 'request_timeout': f"{config.request_timeout}s"
             }
         }
@@ -656,9 +1098,11 @@ def start_api_server():
         print(f"  ├─ POST /playlist      - 获取歌单详情")
         print(f"  ├─ POST /album         - 获取专辑详情")
         print(f"  ├─ POST /download      - 下载音乐")
+        print(f"  ├─ POST /batch/parse   - 文件批量解析")
+        print(f"  ├─ POST /batch/download - 批量下载 ZIP")
         print(f"  └─ GET  /api/info      - API信息")
         print("\n🎵 支持的音质:")
-        print(f"  standard, exhigh, lossless, hires, sky, jyeffect, jymaster")
+        print(f"  standard, exhigh, lossless, hires, sky, jyeffect, jymaster, dolby")
         print("="*60)
         print(f"⏰ 启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("🌟 服务已就绪，等待请求...\n")

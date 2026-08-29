@@ -8,3 +8,6 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+
+downloads/
+music_api.log

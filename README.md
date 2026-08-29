@@ -56,7 +56,7 @@
 ## 🚀 快速开始
 
 ### 环境要求
-- Python 3.7+
+- Python 3.9+
 - 网易云音乐黑胶会员账号
 
 ### 安装步骤
@@ -116,6 +116,15 @@ docker run -d -p 5000:5000 netease-music-api
 2. 输入歌曲ID或网易云音乐链接
    - 支持格式：`1234567890` 或 `https://music.163.com/song?id=1234567890`
 3. 点击**解析**按钮查看歌曲信息
+
+#### 📁 文件批量解析与下载
+1. 选择功能：**单曲解析**
+2. 选择解析音质，并上传 `.txt`、`.csv` 或 `.xlsx` 文件
+3. TXT/CSV 每行填写一个歌曲 ID 或网易云单曲链接；Excel 使用“歌曲 ID”或“网易云链接”列
+4. 点击**上传并批量解析**，查看每首歌曲的成功或失败结果
+5. 点击**批量下载成功歌曲**，服务会将音频和处理结果打包为 ZIP
+
+批量上传会按出现顺序自动去重。单个文件最大 10MB、最多识别 2000 首歌曲，每批最多处理 200 首，超过后自动分批。TXT/CSV 支持 UTF-8、GB18030 编码。
 
 #### 📋 歌单解析
 1. 选择功能：**歌单解析**
@@ -246,6 +255,39 @@ Content-Type: application/json
 }
 ```
 **响应**: 直接返回音频文件流
+
+#### 7. 文件批量解析
+```http
+POST /batch/parse
+Content-Type: multipart/form-data
+
+file: songs.xlsx
+level: lossless
+```
+
+`file` 支持 TXT、CSV、XLSX；Excel 需包含“歌曲 ID”或“网易云链接”表头。
+
+也可以直接提交 JSON：
+
+```json
+{
+  "ids": ["185668", "1392990601"],
+  "level": "lossless"
+}
+```
+
+#### 8. 批量下载 ZIP
+```http
+POST /batch/download
+Content-Type: application/json
+
+{
+  "ids": ["185668", "1392990601"],
+  "quality": "lossless"
+}
+```
+
+成功时返回 ZIP 文件。部分歌曲失败不会中断整个批次，失败明细会写入 ZIP 中的 `批量下载结果.txt`。
 
 ---
 

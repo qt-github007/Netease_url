@@ -131,16 +131,19 @@ class MusicDownloader:
         download_dir: str = "downloads",
         max_concurrent: int = 3,
         ffmpeg_path: Optional[str] = None,
+        max_file_size: int = 500 * 1024 * 1024,
     ):
         """
         Args:
             download_dir: 下载目录
             max_concurrent: 最大并发下载数
             ffmpeg_path: ffmpeg 可执行文件路径，为 None 时启动时检测一次
+            max_file_size: 允许下载的单个文件最大字节数
         """
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
         self.max_concurrent = max_concurrent
+        self.max_file_size = max_file_size
 
         self.api = NeteaseAPI()
 
@@ -211,7 +214,6 @@ class MusicDownloader:
             cookies = load_cookies()
 
             url_result = self.api.get_song_url(music_id, quality, cookies)
-            print(url_result)
             if not url_result.get("data") or not url_result["data"]:
                 raise DownloadException(f"无法获取音乐ID {music_id} 的播放链接")
 
@@ -219,6 +221,12 @@ class MusicDownloader:
             download_url = song_data.get("url", "")
             if not download_url:
                 raise DownloadException(f"音乐ID {music_id} 无可用的下载链接")
+            file_size = song_data.get("size", 0) or 0
+            if file_size > self.max_file_size:
+                raise DownloadException(
+                    f"音乐ID {music_id} 的文件大小超过限制 "
+                    f"({file_size} > {self.max_file_size} 字节)"
+                )
 
             detail_result = self.api.get_song_detail(music_id)
             if not detail_result.get("songs") or not detail_result["songs"]:
@@ -242,7 +250,7 @@ class MusicDownloader:
                 track_number=song_detail.get("no", 0),
                 download_url=download_url,
                 file_type=song_data.get("type", "mp3").lower(),
-                file_size=song_data.get("size", 0),
+                file_size=file_size,
                 quality=quality,
                 lyric=lyric,
                 tlyric=tlyric,
@@ -257,7 +265,10 @@ class MusicDownloader:
 
     def _build_file_path(self, music_info: MusicInfo) -> Path:
         """根据 MusicInfo 生成下载文件路径"""
-        filename = f"{music_info.artists} - {music_info.name}"
+        filename = (
+            f"{music_info.artists} - {music_info.name} "
+            f"[{music_info.quality}] ({music_info.id})"
+        )
         safe = self._sanitize_filename(filename)
         ext = self._determine_file_extension(
             music_info.download_url,
