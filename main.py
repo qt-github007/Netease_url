@@ -837,18 +837,17 @@ def get_song_info():
 
 def _get_batch_ids_from_request() -> List[str]:
     """从上传文件、JSON 或表单字段读取批量歌曲 ID。"""
+    values: List[Any] = []
     uploaded_file = request.files.get('file')
     if uploaded_file and uploaded_file.filename:
-        return api_service.read_song_ids_from_upload(uploaded_file)
+        values.extend(api_service.read_song_ids_from_upload(uploaded_file))
 
     data = api_service._safe_get_request_data()
     raw_ids = data.get('ids') or data.get('content')
     if isinstance(raw_ids, list):
-        values = raw_ids
+        values.extend(raw_ids)
     elif raw_ids is not None:
-        values = [raw_ids]
-    else:
-        values = []
+        values.append(raw_ids)
     return api_service.validate_batch_ids(values)
 
 

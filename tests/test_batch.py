@@ -178,15 +178,15 @@ class BatchApiTests(unittest.TestCase):
         )
         response = self.client.post(
             '/batch/parse',
-            data={'file': upload, 'level': 'lossless'},
+            data={'file': upload, 'content': '444444', 'level': 'lossless'},
             content_type='multipart/form-data',
         )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()['data']
-        self.assertEqual(payload['ids'], ['111111', '222222', '333333'])
-        self.assertEqual(payload['total'], 3)
-        self.assertEqual(payload['succeeded'], 2)
+        self.assertEqual(payload['ids'], ['111111', '222222', '333333', '444444'])
+        self.assertEqual(payload['total'], 4)
+        self.assertEqual(payload['succeeded'], 3)
         self.assertEqual(payload['failed'], 1)
         self.assertFalse(payload['results'][1]['success'])
 
