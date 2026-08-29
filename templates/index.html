@@ -148,6 +148,7 @@
                             <button type="button" id="parse-btn" class="btn btn-primary w-50">解析单曲</button>
                         </div>
                         <hr>
+                        <h6 class="mb-3">按歌曲 ID 或链接批量解析</h6>
                         <div class="mb-3">
                             <label for="song-file" class="form-label">上传歌曲列表文件</label>
                             <input type="file" id="song-file" class="form-control" accept=".txt,.csv,.xlsx,text/plain,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
@@ -164,6 +165,30 @@
                             </div>
                             <div class="text-center mt-2">
                                 <small class="text-muted">正在读取文件并批量解析...</small>
+                            </div>
+                        </div>
+                        <hr>
+                        <h6 class="mb-3">按歌名批量查找</h6>
+                        <div class="mb-3">
+                            <label for="song-name-input" class="form-label">歌曲名称</label>
+                            <textarea id="song-name-input" class="form-control" rows="5" placeholder="每行输入一个歌曲名称，例如：&#10;晴天 | 周杰伦&#10;海阔天空 | Beyond"></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="song-name-file" class="form-label">或上传 TXT 歌名列表</label>
+                            <input type="file" id="song-name-file" class="form-control" accept=".txt,text/plain">
+                            <div class="form-text batch-file-help">
+                                每行一个歌名，推荐使用“歌名 | 歌手”提高准确率；最多 200 个名称，TXT 不超过 10MB。文本和文件可同时使用。
+                            </div>
+                        </div>
+                        <div class="d-flex gap-2 justify-content-center">
+                            <button type="button" id="resolve-names-btn" class="btn btn-outline-success w-50">查找歌曲 ID</button>
+                        </div>
+                        <div id="resolve-names-progress" class="mt-3 d-none">
+                            <div class="progress">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width: 100%"></div>
+                            </div>
+                            <div class="text-center mt-2">
+                                <small class="text-muted">正在按歌名查找最相关歌曲...</small>
                             </div>
                         </div>
                     </div>
@@ -222,6 +247,43 @@
         <div id="search-result" class="mt-4 d-none">
             <h5>搜索结果：</h5>
             <ul class="list-group" id="search-list"></ul>
+        </div>
+        <!-- 歌名批量查找结果 -->
+        <div id="name-match-result" class="mt-4 d-none">
+            <div class="card shadow-sm">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div>
+                        <strong>歌名匹配结果</strong>
+                        <span id="name-match-summary" class="text-muted ms-2"></span>
+                    </div>
+                    <button type="button" id="parse-matched-btn" class="btn btn-primary btn-sm" disabled>解析已选歌曲</button>
+                </div>
+                <div id="parse-matched-progress" class="px-3 pt-3 d-none">
+                    <div class="progress">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+                    </div>
+                    <div class="text-center mt-2">
+                        <small class="text-muted">正在进入批量解析...</small>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover mb-0 batch-result-table">
+                        <thead>
+                            <tr>
+                                <th>选择</th>
+                                <th>输入内容</th>
+                                <th>匹配歌曲</th>
+                                <th>歌手</th>
+                                <th>专辑</th>
+                                <th>ID</th>
+                                <th>网易云链接</th>
+                            </tr>
+                        </thead>
+                        <tbody id="name-match-list"></tbody>
+                    </table>
+                </div>
+                <div class="card-footer small text-muted">每行可在候选下拉框中改选版本；仍不准确时可取消勾选后再解析。</div>
+            </div>
         </div>
         <!-- 结果展示区域 -->
         <div id="song-info" class="alert alert-info d-none mt-4 p-0 border-0" style="box-shadow:0 2px 8px rgba(0,0,0,0.07);">
@@ -334,7 +396,7 @@
     </div>
     <footer class="footer mt-5 py-3 bg-light border-top">
         <div class="container text-center text-muted small">
-            <span>网易云音乐工具箱 &copy; 2025 | Powered by Suxiaoqingx &amp; Bootstrap | <a href="https://github.com/Suxiaoqinx/Netease_url" target="_blank">GitHub</a></span>
+            <span>网易云音乐工具箱 &copy; 2025 | Powered by Suxiaoqingx &amp; Bootstrap | <a href="https://github.com/qt-github007/Netease_url" target="_blank">GitHub</a></span>
         </div>
     </footer>
     <script src="https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
@@ -344,6 +406,7 @@
         $(document).ready(function() {
             let batchSongIds = [];
             let batchLevel = 'lossless';
+            let nameMatchResults = [];
 
             function escapeHtml(value) {
                 return $('<div>').text(value == null ? '' : String(value)).html();
@@ -462,6 +525,7 @@
                     $('#download-area').hide();
                     $('#song-info').addClass('d-none');
                     $('#batch-result').addClass('d-none');
+                    $('#name-match-result').addClass('d-none');
                     $('#playlist-result').addClass('d-none');
                     $('#album-result').addClass('d-none');
                 } else if ($(this).val() === 'parse') {
@@ -482,6 +546,7 @@
                     $('#search-result').addClass('d-none');
                     $('#song-info').addClass('d-none');
                     $('#batch-result').addClass('d-none');
+                    $('#name-match-result').addClass('d-none');
                     $('#album-result').addClass('d-none');
                 } else if ($(this).val() === 'album') {
                     $('#search-area').hide();
@@ -492,6 +557,7 @@
                     $('#search-result').addClass('d-none');
                     $('#song-info').addClass('d-none');
                     $('#batch-result').addClass('d-none');
+                    $('#name-match-result').addClass('d-none');
                     $('#playlist-result').addClass('d-none');
                     $('#album-result').addClass('d-none');
                 } else if ($(this).val() === 'download') {
@@ -503,6 +569,7 @@
                     $('#search-result').addClass('d-none');
                     $('#song-info').addClass('d-none');
                     $('#batch-result').addClass('d-none');
+                    $('#name-match-result').addClass('d-none');
                     $('#playlist-result').addClass('d-none');
                     $('#album-result').addClass('d-none');
                 } else {
@@ -658,6 +725,190 @@
                     .text(`批量下载成功歌曲（${batchSongIds.length}）`);
                 $('#batch-result').removeClass('d-none');
             }
+
+            function selectedMatchedIds() {
+                const ids = [];
+                const seen = new Set();
+                $('.name-match-checkbox:checked').each(function() {
+                    const musicId = String($(this).attr('data-id'));
+                    if (!seen.has(musicId)) {
+                        seen.add(musicId);
+                        ids.push(musicId);
+                    }
+                });
+                return ids;
+            }
+
+            function updateMatchedParseButton() {
+                const resolvedSongIds = selectedMatchedIds();
+                $('#parse-matched-btn')
+                    .prop('disabled', resolvedSongIds.length === 0)
+                    .text(`解析已选歌曲（${resolvedSongIds.length}）`);
+            }
+
+            function renderNameMatches(data) {
+                const list = $('#name-match-list');
+                list.empty();
+                nameMatchResults = data.results;
+                data.results.forEach(function(item, resultIndex) {
+                    if (!item.success) {
+                        list.append(`
+                            <tr>
+                                <td><input class="form-check-input" type="checkbox" disabled></td>
+                                <td>${escapeHtml(item.query)}</td>
+                                <td colspan="5" class="text-danger text-wrap">${escapeHtml(item.error || '未找到相关歌曲')}</td>
+                            </tr>
+                        `);
+                        return;
+                    }
+
+                    const candidates = item.candidates && item.candidates.length
+                        ? item.candidates
+                        : [item];
+                    const candidateOptions = candidates.map(function(candidate, candidateIndex) {
+                        const label = `${candidate.name} - ${candidate.artists}（ID: ${candidate.id}）`;
+                        return `<option value="${candidateIndex}">${escapeHtml(label)}</option>`;
+                    }).join('');
+                    const safeLink = /^https:\/\/music\.163\.com\/song\?id=\d+$/.test(item.link || '') ? item.link : '';
+                    const link = safeLink
+                        ? `<a href="${escapeHtml(safeLink)}" target="_blank" rel="noopener">打开</a>`
+                        : '-';
+                    const autoSelected = item.auto_selected !== false;
+                    const reviewBadge = `<span class="badge bg-warning text-dark ms-1 artist-review-badge ${autoSelected ? 'd-none' : ''}">歌手未匹配，请确认</span>`;
+                    list.append(`
+                        <tr data-result-index="${resultIndex}" class="${autoSelected ? '' : 'table-warning'}">
+                            <td><input class="form-check-input name-match-checkbox" type="checkbox" data-id="${escapeHtml(item.id)}" ${autoSelected ? 'checked' : ''}></td>
+                            <td>${escapeHtml(item.query)}${reviewBadge}</td>
+                            <td class="batch-song-name"><select class="form-select form-select-sm name-match-candidate">${candidateOptions}</select></td>
+                            <td class="candidate-artists">${escapeHtml(item.artists)}</td>
+                            <td class="candidate-album">${escapeHtml(item.album)}</td>
+                            <td class="candidate-id">${escapeHtml(item.id)}</td>
+                            <td class="candidate-link">${link}</td>
+                        </tr>
+                    `);
+                });
+
+                $('#name-match-summary').text(`输入 ${data.total} 个，找到 ${data.succeeded} 个，需确认 ${data.needs_review || 0} 个，未找到 ${data.failed} 个`);
+                $('#name-match-result').removeClass('d-none');
+                updateMatchedParseButton();
+            }
+
+            $(document).on('change', '.name-match-checkbox', updateMatchedParseButton);
+
+            $(document).on('change', '.name-match-candidate', function() {
+                const row = $(this).closest('tr');
+                const resultIndex = Number(row.attr('data-result-index'));
+                const candidateIndex = Number($(this).val());
+                const result = nameMatchResults[resultIndex];
+                const candidate = result && result.candidates
+                    ? result.candidates[candidateIndex]
+                    : null;
+                if (!candidate) {
+                    return;
+                }
+
+                row.find('.name-match-checkbox').attr('data-id', candidate.id);
+                if (candidate.artist_matched === true) {
+                    row.find('.name-match-checkbox').prop('checked', true);
+                    row.removeClass('table-warning');
+                    row.find('.artist-review-badge').addClass('d-none');
+                } else if (candidate.artist_matched === false) {
+                    row.find('.name-match-checkbox').prop('checked', false);
+                    row.addClass('table-warning');
+                    row.find('.artist-review-badge').removeClass('d-none');
+                }
+                row.find('.candidate-artists').text(candidate.artists || '');
+                row.find('.candidate-album').text(candidate.album || '');
+                row.find('.candidate-id').text(candidate.id || '');
+                const safeLink = /^https:\/\/music\.163\.com\/song\?id=\d+$/.test(candidate.link || '')
+                    ? candidate.link
+                    : '';
+                row.find('.candidate-link').empty();
+                if (safeLink) {
+                    $('<a>', {
+                        href: safeLink,
+                        target: '_blank',
+                        rel: 'noopener',
+                        text: '打开'
+                    }).appendTo(row.find('.candidate-link'));
+                } else {
+                    row.find('.candidate-link').text('-');
+                }
+                updateMatchedParseButton();
+            });
+
+            $('#resolve-names-btn').on('click', function() {
+                const content = $('#song-name-input').val().trim();
+                const fileInput = document.getElementById('song-name-file');
+                const hasFile = fileInput.files && fileInput.files.length > 0;
+                if (!content && !hasFile) {
+                    alert('请输入歌曲名称或上传 TXT 歌名列表');
+                    return;
+                }
+
+                const formData = new FormData();
+                if (content) {
+                    formData.append('content', content);
+                }
+                if (hasFile) {
+                    formData.append('file', fileInput.files[0]);
+                }
+
+                const button = $('#resolve-names-btn');
+                button.prop('disabled', true).text('正在查找...');
+                $('#resolve-names-progress').removeClass('d-none');
+                $.ajax({
+                    url: '/batch/resolve-names',
+                    method: 'POST',
+                    data: formData,
+                    processData: false,
+                    contentType: false,
+                    dataType: 'json'
+                }).done(function(response) {
+                    if (!response.success) {
+                        alert(response.message || '歌名查找失败');
+                        return;
+                    }
+                    renderNameMatches(response.data);
+                    $('html,body').animate({scrollTop: $('#name-match-result').offset().top - 20}, 300);
+                }).fail(function(xhr) {
+                    alert(getApiError(xhr, '歌名查找失败，请检查文本或文件内容'));
+                }).always(function() {
+                    $('#resolve-names-progress').addClass('d-none');
+                    button.prop('disabled', false).text('查找歌曲 ID');
+                });
+            });
+
+            $('#parse-matched-btn').on('click', function() {
+                const ids = selectedMatchedIds();
+                if (!ids.length) {
+                    alert('请至少选择一首匹配歌曲');
+                    return;
+                }
+
+                const button = $('#parse-matched-btn');
+                button.prop('disabled', true).text('批量解析中...');
+                $('#parse-matched-progress').removeClass('d-none');
+                $.ajax({
+                    url: '/batch/parse',
+                    method: 'POST',
+                    data: JSON.stringify({ids: ids, level: $('#level').val()}),
+                    contentType: 'application/json',
+                    dataType: 'json'
+                }).done(function(response) {
+                    if (!response.success) {
+                        alert(response.message || '批量解析失败');
+                        return;
+                    }
+                    renderBatchResults(response.data);
+                    $('html,body').animate({scrollTop: $('#batch-result').offset().top - 20}, 300);
+                }).fail(function(xhr) {
+                    alert(getApiError(xhr, '批量解析失败，请稍后重试'));
+                }).always(function() {
+                    $('#parse-matched-progress').addClass('d-none');
+                    updateMatchedParseButton();
+                });
+            });
 
             $('#batch-parse-btn').on('click', function() {
                 const fileInput = document.getElementById('song-file');

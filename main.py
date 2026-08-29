@@ -245,6 +245,178 @@ class MusicAPIService:
             raise ValueError("文件中没有找到歌曲 ID 或网易云单曲链接")
         return self.validate_batch_ids(music_ids)
 
+    def read_song_names_from_upload(self, uploaded_file) -> List[str]:
+        """读取上传的 TXT 文件，每行作为一个歌曲搜索词。"""
+        filename = uploaded_file.filename or ''
+        if Path(filename).suffix.lower() != '.txt':
+            raise ValueError("歌名列表仅支持 .txt 文件")
+
+        raw = uploaded_file.stream.read(self.config.max_upload_size + 1)
+        if len(raw) > self.config.max_upload_size:
+            raise ValueError("上传文件不能超过 10MB")
+        if not raw:
+            raise ValueError("上传文件为空")
+
+        for encoding in ('utf-8-sig', 'gb18030'):
+            try:
+                return self.validate_song_queries([raw.decode(encoding)])
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("文件编码无法识别，请使用 UTF-8 或 GB18030")
+
+    def validate_song_queries(self, values: Iterable[Any]) -> List[str]:
+        """规范化、去重并限制批量歌名搜索词。"""
+        queries: List[str] = []
+        seen = set()
+        for value in values:
+            for line in str(value or '').splitlines():
+                query = line.strip().lstrip('\ufeff')
+                if not query:
+                    continue
+                if len(query) > 200:
+                    raise ValueError("单个歌曲名称不能超过 200 个字符")
+                normalized = query.casefold()
+                if normalized not in seen:
+                    seen.add(normalized)
+                    queries.append(query)
+
+        if not queries:
+            raise ValueError("请输入歌曲名称或上传 TXT 歌名列表")
+        if len(queries) > self.config.max_batch_items:
+            raise ValueError(
+                f"一次最多查找 {self.config.max_batch_items} 个歌曲名称，"
+                f"当前识别到 {len(queries)} 个"
+            )
+        return queries
+
+    def resolve_song_name(self, query: str, cookies: Dict[str, str]) -> Dict[str, Any]:
+        """查找一个歌曲名称并返回最相关的一首，单条失败不影响其余结果。"""
+        try:
+            search_query = re.sub(r'\s*[|｜]\s*', ' ', query).strip()
+            songs = search_music(search_query, cookies, 10)
+            if not songs:
+                return {
+                    'query': query,
+                    'success': False,
+                    'error': '未找到相关歌曲',
+                }
+
+            ranked_songs = sorted(
+                enumerate(songs),
+                key=lambda pair: (self._score_song_match(query, pair[1]), -pair[0]),
+                reverse=True,
+            )
+            candidates: List[Dict[str, Any]] = []
+            seen_ids = set()
+            explicit_parts = re.split(r'[|｜]', query, maxsplit=1)
+            expected_artist = re.sub(
+                r'[^\w\u4e00-\u9fff]+',
+                '',
+                explicit_parts[1].casefold(),
+            ) if len(explicit_parts) > 1 else ''
+            for _, song in ranked_songs:
+                music_id = str(song.get('id', '')).strip()
+                if not music_id.isdigit() or music_id in seen_ids:
+                    continue
+                seen_ids.add(music_id)
+                candidate_artists = str(song.get('artists', ''))
+                normalized_artists = re.sub(
+                    r'[^\w\u4e00-\u9fff]+', '', candidate_artists.casefold()
+                )
+                candidates.append({
+                    'id': music_id,
+                    'name': str(song.get('name', '')),
+                    'artists': candidate_artists,
+                    'album': str(song.get('album', '')),
+                    'picUrl': str(song.get('picUrl', '')),
+                    'link': f"https://music.163.com/song?id={music_id}",
+                    'artist_matched': (
+                        expected_artist in normalized_artists
+                        if expected_artist
+                        else None
+                    ),
+                })
+                if len(candidates) >= 5:
+                    break
+            if not candidates:
+                raise ValueError("搜索结果缺少有效歌曲 ID")
+
+            song = candidates[0]
+            return {
+                'query': query,
+                'success': True,
+                **song,
+                'candidate_count': len(candidates),
+                'candidates': candidates,
+                'auto_selected': song.get('artist_matched') is not False,
+            }
+        except Exception as e:
+            return {
+                'query': query,
+                'success': False,
+                'error': str(e),
+            }
+
+    @staticmethod
+    def _score_song_match(query: str, song: Dict[str, Any]) -> int:
+        """按歌名和歌手覆盖度给搜索候选排序，降低翻唱/伴奏误匹配。"""
+        normalize = lambda value: re.sub(
+            r'[^\w\u4e00-\u9fff]+', '', str(value or '').casefold()
+        )
+        explicit_parts = re.split(r'[|｜]', query, maxsplit=1)
+        explicit_title = normalize(explicit_parts[0]) if explicit_parts else ''
+        explicit_artist = normalize(explicit_parts[1]) if len(explicit_parts) > 1 else ''
+        query_tokens = [
+            normalize(token)
+            for token in re.split(r'[\s|｜]+', query)
+            if token
+        ]
+        query_tokens = [token for token in query_tokens if token]
+        name = normalize(song.get('name'))
+        artists = normalize(song.get('artists'))
+        album = normalize(song.get('album'))
+        searchable = f"{name}{artists}{album}"
+        if not query_tokens:
+            return 0
+
+        score = 0
+        title_token = explicit_title or query_tokens[0]
+        if name == title_token:
+            score += 40
+        elif name.startswith(title_token):
+            score += 20
+
+        missing_tokens = 0
+        for token in query_tokens:
+            if token == name:
+                score += 15
+            elif token in name:
+                score += 8
+            if token == artists:
+                score += 40
+            elif token in artists:
+                score += 16
+            if token in searchable:
+                score += 10
+            else:
+                missing_tokens += 1
+        score -= missing_tokens * 30
+
+        if explicit_artist:
+            if artists == explicit_artist:
+                score += 100
+            elif explicit_artist in artists:
+                score += 60
+            else:
+                score -= 80
+
+        query_text = normalize(query)
+        for marker in ('翻唱', 'cover', '伴奏', '纯音乐', '钢琴版', '吉他版', 'dj版', '原唱'):
+            normalized_marker = normalize(marker)
+            if normalized_marker in name and normalized_marker not in query_text:
+                score -= 15
+        return score
+
     def extract_music_ids_from_xlsx(self, raw: bytes) -> List[str]:
         """从带“歌曲 ID”或“网易云链接”表头的 Excel 工作表中提取歌曲。"""
         try:
@@ -394,6 +566,8 @@ class MusicAPIService:
 
             song_data = songs[0]
             url_data = (url_info.get('data') or [{}])[0] if url_info else {}
+            if not url_data.get('url'):
+                raise APIException("未获取到下载链接，请检查 Cookie、歌曲版权或所选音质")
             return {
                 'id': music_id,
                 'success': True,
@@ -676,6 +850,74 @@ def _get_batch_ids_from_request() -> List[str]:
     else:
         values = []
     return api_service.validate_batch_ids(values)
+
+
+def _get_song_queries_from_request() -> List[str]:
+    """从 TXT 上传和文本输入中读取批量歌曲名称。"""
+    values: List[str] = []
+    uploaded_file = request.files.get('file')
+    if uploaded_file and uploaded_file.filename:
+        values.extend(api_service.read_song_names_from_upload(uploaded_file))
+
+    data = api_service._safe_get_request_data()
+    raw_queries = data.get('queries') or data.get('content')
+    if isinstance(raw_queries, list):
+        values.extend(str(value) for value in raw_queries)
+    elif raw_queries is not None:
+        values.append(str(raw_queries))
+    return api_service.validate_song_queries(values)
+
+
+@app.route('/batch/resolve-names', methods=['POST'])
+def batch_resolve_song_names():
+    """批量搜索歌曲名称，返回最相关歌曲的 ID 和网易云链接。"""
+    try:
+        queries = _get_song_queries_from_request()
+        cookies = api_service._get_cookies()
+
+        def resolve_one(query: str) -> Dict[str, Any]:
+            return api_service.resolve_song_name(query, cookies)
+
+        with ThreadPoolExecutor(max_workers=config.batch_workers) as executor:
+            results = list(executor.map(resolve_one, queries))
+
+        matched_ids: List[str] = []
+        seen_ids = set()
+        for item in results:
+            music_id = (
+                item.get('id')
+                if item.get('success') and item.get('auto_selected', True)
+                else None
+            )
+            if music_id and music_id not in seen_ids:
+                seen_ids.add(music_id)
+                matched_ids.append(music_id)
+
+        succeeded = sum(1 for item in results if item.get('success'))
+        needs_review = sum(
+            1
+            for item in results
+            if item.get('success') and not item.get('auto_selected', True)
+        )
+        response_data = {
+            'queries': queries,
+            'ids': matched_ids,
+            'total': len(queries),
+            'succeeded': succeeded,
+            'failed': len(queries) - succeeded,
+            'needs_review': needs_review,
+            'unique_matches': len(matched_ids),
+            'results': results,
+        }
+        return APIResponse.success(
+            response_data,
+            f"歌名查找完成，找到 {succeeded} 个，其中需确认 {needs_review} 个",
+        )
+    except ValueError as e:
+        return APIResponse.error(str(e), 400)
+    except Exception as e:
+        api_service.logger.error(f"批量歌名查找异常: {e}\n{traceback.format_exc()}")
+        return APIResponse.error(f"批量歌名查找失败: {str(e)}", 500)
 
 
 @app.route('/batch/parse', methods=['POST'])
@@ -1057,6 +1299,7 @@ def api_info():
                 '/playlist': 'GET/POST - 获取歌单详情',
                 '/album': 'GET/POST - 获取专辑详情',
                 '/download': 'GET/POST - 下载音乐',
+                '/batch/resolve-names': 'POST - 批量歌名查找歌曲 ID 和链接',
                 '/batch/parse': 'POST - 上传文件或 ID 列表批量解析',
                 '/batch/download': 'POST - 批量下载并打包 ZIP',
                 '/api/info': 'GET - API信息'
@@ -1098,6 +1341,7 @@ def start_api_server():
         print(f"  ├─ POST /playlist      - 获取歌单详情")
         print(f"  ├─ POST /album         - 获取专辑详情")
         print(f"  ├─ POST /download      - 下载音乐")
+        print(f"  ├─ POST /batch/resolve-names - 批量歌名查找")
         print(f"  ├─ POST /batch/parse   - 文件批量解析")
         print(f"  ├─ POST /batch/download - 批量下载 ZIP")
         print(f"  └─ GET  /api/info      - API信息")

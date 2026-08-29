@@ -75,6 +75,52 @@ class SongIdExtractionTests(unittest.TestCase):
             ['27927803', '2018734484'],
         )
 
+    def test_song_name_queries_keep_order_and_remove_duplicates(self):
+        queries = main.api_service.validate_song_queries([
+            ' 晴天 周杰伦\n海阔天空 Beyond\n晴天 周杰伦 ',
+            'HERO\nhero',
+        ])
+
+        self.assertEqual(queries, ['晴天 周杰伦', '海阔天空 Beyond', 'HERO'])
+
+    def test_song_name_txt_only_accepts_txt(self):
+        uploaded = FileStorage(stream=io.BytesIO('晴天'.encode()), filename='songs.csv')
+        with self.assertRaisesRegex(ValueError, '仅支持 .txt'):
+            main.api_service.read_song_names_from_upload(uploaded)
+
+    def test_song_name_match_prefers_matching_artist_over_first_result(self):
+        first_result = {
+            'name': '晴天（翻唱版）',
+            'artists': '其他歌手',
+            'album': '翻唱合集',
+        }
+        matching_artist = {
+            'name': '晴天',
+            'artists': '周杰伦',
+            'album': '叶惠美',
+        }
+
+        self.assertGreater(
+            main.api_service._score_song_match('晴天 | 周杰伦', matching_artist),
+            main.api_service._score_song_match('晴天 | 周杰伦', first_result),
+        )
+
+    @patch('main.search_music')
+    def test_explicit_artist_mismatch_requires_manual_confirmation(self, mocked_search):
+        mocked_search.return_value = [{
+            'id': 2064191772,
+            'name': '晴天周杰伦',
+            'artists': '其他歌手',
+            'album': '测试专辑',
+            'picUrl': '',
+        }]
+
+        result = main.api_service.resolve_song_name('晴天 | 周杰伦', {})
+
+        self.assertTrue(result['success'])
+        self.assertFalse(result['artist_matched'])
+        self.assertFalse(result['auto_selected'])
+
 
 class BatchApiTests(unittest.TestCase):
     def setUp(self):
@@ -105,6 +151,18 @@ class BatchApiTests(unittest.TestCase):
                 'type': 'flac',
             }]
         }
+
+    @patch('main.url_v1', return_value={'data': [{'url': None}]})
+    @patch('main.name_v1')
+    def test_batch_summary_marks_missing_download_url_as_failure(
+        self, mocked_detail, mocked_url
+    ):
+        mocked_detail.return_value = self.fake_song_detail(111111)
+
+        result = main.api_service.parse_song_summary('111111', 'standard', {})
+
+        self.assertFalse(result['success'])
+        self.assertIn('未获取到下载链接', result['error'])
 
     @patch('main.load_cookies', return_value={})
     @patch('main.url_v1', side_effect=fake_song_url.__func__)
@@ -141,6 +199,54 @@ class BatchApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn('TXT', response.get_json()['message'].upper())
+
+    @patch.object(main.api_service, '_get_cookies', return_value={})
+    @patch('main.search_music')
+    def test_batch_resolve_names_returns_ids_links_and_partial_failures(
+        self, mocked_search, mocked_cookies
+    ):
+        songs = {
+            '晴天 周杰伦': [{
+                'id': 186016,
+                'name': '晴天',
+                'artists': '周杰伦',
+                'album': '叶惠美',
+                'picUrl': 'https://example.com/1.jpg',
+            }],
+            '海阔天空 Beyond': [{
+                'id': 347230,
+                'name': '海阔天空',
+                'artists': 'Beyond',
+                'album': '乐与怒',
+                'picUrl': 'https://example.com/2.jpg',
+            }],
+            '不存在的测试歌曲': [],
+        }
+        mocked_search.side_effect = lambda query, cookies, limit: songs[query]
+
+        response = self.client.post(
+            '/batch/resolve-names',
+            data={
+                'content': '晴天 周杰伦',
+                'file': (
+                    io.BytesIO('海阔天空 Beyond\n不存在的测试歌曲'.encode()),
+                    'names.txt',
+                ),
+            },
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()['data']
+        self.assertEqual(payload['total'], 3)
+        self.assertEqual(payload['succeeded'], 2)
+        self.assertEqual(payload['failed'], 1)
+        self.assertEqual(payload['ids'], ['347230', '186016'])
+        self.assertEqual(
+            payload['results'][0]['link'],
+            'https://music.163.com/song?id=347230',
+        )
+        self.assertFalse(payload['results'][1]['success'])
 
     @patch.object(main.api_service, '_get_cookies', return_value={})
     @patch.object(main.api_service, 'parse_song_summary')
